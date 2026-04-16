@@ -1,0 +1,154 @@
+public class CeidgAddressingInspector : IClientMessageInspector
+{
+    private const string AddressingNs = "http://www.w3.org/2005/08/addressing";
+    private const string DiagnosticsNs = "http://schemas.microsoft.com/diagnostics";
+    private const string ActionBase = "http://zeto.bialystok.pl/IApiService";
+
+    public object BeforeSendRequest(ref Message request, IClientChannel channel)
+    {
+        // 🔥 wyciągamy nazwę operacji z SOAP
+        var operationName = request.Headers.Action?.Split('/').Last();
+
+        if (string.IsNullOrEmpty(operationName))
+        {
+            // fallback – czasem Action jest null
+            operationName = request.Properties.ContainsKey("HttpOperationName")
+                ? request.Properties["HttpOperationName"]?.ToString()
+                : "Unknown";
+        }
+
+        var action = $"{ActionBase}/{operationName}";
+
+        // ✅ ustaw Action (lepsze niż header ręczny)
+        request.Headers.Action = action;
+
+        // ✅ TO
+        var toHeader = MessageHeader.CreateHeader(
+            "To",
+            AddressingNs,
+            channel.RemoteAddress.Uri.ToString(),
+            mustUnderstand: true
+        );
+
+        // ✅ REPLY TO
+        var replyTo = new EndpointAddress(AddressingNs + "/anonymous");
+
+        var replyToHeader = MessageHeader.CreateHeader(
+            "ReplyTo",
+            AddressingNs,
+            replyTo
+        );
+
+        // ✅ ACTIVITY ID
+        var activityId = Guid.NewGuid().ToString();
+
+        var activityHeader = MessageHeader.CreateHeader(
+            "ActivityId",
+            DiagnosticsNs,
+            activityId
+        );
+
+        request.Headers.Add(toHeader);
+        request.Headers.Add(replyToHeader);
+        request.Headers.Add(activityHeader);
+
+        return null;
+    }
+
+    public void AfterReceiveReply(ref Message reply, object correlationState)
+    {
+    }
+}
+
+
+
+
+
+
+public class CeidgEndpointBehavior : IEndpointBehavior
+{
+    private readonly IClientMessageInspector _inspector;
+
+    public CeidgEndpointBehavior(IClientMessageInspector inspector)
+    {
+        _inspector = inspector;
+    }
+
+    public void ApplyClientBehavior(ServiceEndpoint endpoint, ClientRuntime clientRuntime)
+    {
+        clientRuntime.ClientMessageInspectors.Add(_inspector);
+    }
+
+    public void AddBindingParameters(ServiceEndpoint endpoint, BindingParameterCollection bindingParameters) { }
+    public void ApplyDispatchBehavior(ServiceEndpoint endpoint, EndpointDispatcher endpointDispatcher) { }
+    public void Validate(ServiceEndpoint endpoint) { }
+}
+
+
+public interface ICeidgClient
+{
+    Task<GetEntryStatusResponse> GetEntryStatusAsync(GetEntryStatusRequest request);
+    Task<GetEntryResponse> GetEntryAsync(GetEntryRequest request);
+}
+
+
+public class CeidgClient : ICeidgClient
+{
+    private readonly ApiServiceClient _client;
+
+    public CeidgClient(ApiServiceClient client)
+    {
+        _client = client;
+    }
+
+    public async Task<GetEntryStatusResponse> GetEntryStatusAsync(GetEntryStatusRequest request)
+    {
+        return await Execute(async () =>
+            await _client.GetEntryStatusAsync(request));
+    }
+
+    public async Task<GetEntryResponse> GetEntryAsync(GetEntryRequest request)
+    {
+        return await Execute(async () =>
+            await _client.GetEntryAsync(request));
+    }
+
+    // 🔥 wspólna logika (retry, logi, handling)
+    private async Task<T> Execute<T>(Func<Task<T>> action)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (Exception ex)
+        {
+            // tu możesz:
+            // - logować SOAP
+            // - retry
+            // - mapować błędy
+            throw;
+        }
+    }
+}
+
+
+
+builder.Services.AddSingleton<ApiServiceClient>(sp =>
+{
+    var client = new ApiServiceClient(binding, address);
+
+    // logger
+    client.Endpoint.EndpointBehaviors.Add(
+        sp.GetRequiredService<MessageLoggerBehavior>());
+
+    // WS-Addressing
+    client.Endpoint.EndpointBehaviors.Add(
+        sp.GetRequiredService<CeidgEndpointBehavior>());
+
+    return client;
+});
+
+builder.Services.AddTransient<IClientMessageInspector, CeidgAddressingInspector>();
+builder.Services.AddTransient<CeidgEndpointBehavior>();
+
+builder.Services.AddScoped<ICeidgClient, CeidgClient>();
