@@ -1,63 +1,96 @@
-public class CeidgAddressingInspector : IClientMessageInspector
+using System.ServiceModel.Channels;
+
+private Message CreateMessage(string action = "http://tempuri.org/IApiService/GetEntryStatus")
 {
-    private const string AddressingNs = "http://www.w3.org/2005/08/addressing";
-    private const string DiagnosticsNs = "http://schemas.microsoft.com/diagnostics";
-    private const string ActionBase = "http://zeto.bialystok.pl/IApiService";
+    return Message.CreateMessage(
+        MessageVersion.Soap12WSAddressing10,
+        action,
+        "body"
+    );
+}
 
-    public object BeforeSendRequest(ref Message request, IClientChannel channel)
+
+
+public class CeidgAddressingInspectorTests
+{
+    private readonly CeidgAddressingInspector _inspector = new();
+
+    [Fact]
+    public void BeforeSendRequest_Should_Set_Correct_Action()
     {
-        // 🔥 wyciągamy nazwę operacji z SOAP
-        var operationName = request.Headers.Action?.Split('/').Last();
+        // arrange
+        var message = CreateMessage();
+        var channel = new Mock<IClientChannel>();
+        channel.Setup(c => c.RemoteAddress)
+               .Returns(new EndpointAddress("https://test"));
 
-        if (string.IsNullOrEmpty(operationName))
-        {
-            // fallback – czasem Action jest null
-            operationName = request.Properties.ContainsKey("HttpOperationName")
-                ? request.Properties["HttpOperationName"]?.ToString()
-                : "Unknown";
-        }
+        // act
+        _inspector.BeforeSendRequest(ref message, channel.Object);
 
-        var action = $"{ActionBase}/{operationName}";
-
-        // ✅ ustaw Action (lepsze niż header ręczny)
-        request.Headers.Action = action;
-
-        // ✅ TO
-        var toHeader = MessageHeader.CreateHeader(
-            "To",
-            AddressingNs,
-            channel.RemoteAddress.Uri.ToString(),
-            mustUnderstand: true
-        );
-
-        // ✅ REPLY TO
-        var replyTo = new EndpointAddress(AddressingNs + "/anonymous");
-
-        var replyToHeader = MessageHeader.CreateHeader(
-            "ReplyTo",
-            AddressingNs,
-            replyTo
-        );
-
-        // ✅ ACTIVITY ID
-        var activityId = Guid.NewGuid().ToString();
-
-        var activityHeader = MessageHeader.CreateHeader(
-            "ActivityId",
-            DiagnosticsNs,
-            activityId
-        );
-
-        request.Headers.Add(toHeader);
-        request.Headers.Add(replyToHeader);
-        request.Headers.Add(activityHeader);
-
-        return null;
+        // assert
+        message.Headers.Action.Should().Be(
+            "http://zeto.bialystok.pl/IApiService/GetEntryStatus");
     }
+}
 
-    public void AfterReceiveReply(ref Message reply, object correlationState)
-    {
-    }
+
+[Fact]
+public void BeforeSendRequest_Should_Add_Required_Headers()
+{
+    var message = CreateMessage();
+    var channel = new Mock<IClientChannel>();
+    channel.Setup(c => c.RemoteAddress)
+           .Returns(new EndpointAddress("https://test"));
+
+    _inspector.BeforeSendRequest(ref message, channel.Object);
+
+    message.Headers.FindHeader("To", "http://www.w3.org/2005/08/addressing")
+        .Should().BeGreaterThanOrEqualTo(0);
+
+    message.Headers.FindHeader("ReplyTo", "http://www.w3.org/2005/08/addressing")
+        .Should().BeGreaterThanOrEqualTo(0);
+
+    message.Headers.FindHeader("ActivityId", "http://schemas.microsoft.com/diagnostics")
+        .Should().BeGreaterThanOrEqualTo(0);
+}
+
+
+[Fact]
+public void BeforeSendRequest_Should_Add_Valid_ActivityId()
+{
+    var message = CreateMessage();
+    var channel = new Mock<IClientChannel>();
+    channel.Setup(c => c.RemoteAddress)
+           .Returns(new EndpointAddress("https://test"));
+
+    _inspector.BeforeSendRequest(ref message, channel.Object);
+
+    var index = message.Headers.FindHeader(
+        "ActivityId",
+        "http://schemas.microsoft.com/diagnostics");
+
+    var value = message.Headers.GetHeader<string>(index);
+
+    Guid.TryParse(value, out var guid).Should().BeTrue();
+}
+
+
+
+[Fact]
+public void BeforeSendRequest_Should_Handle_Null_Action()
+{
+    var message = Message.CreateMessage(
+        MessageVersion.Soap12WSAddressing10,
+        null,
+        "body");
+
+    var channel = new Mock<IClientChannel>();
+    channel.Setup(c => c.RemoteAddress)
+           .Returns(new EndpointAddress("https://test"));
+
+    var act = () => _inspector.BeforeSendRequest(ref message, channel.Object);
+
+    act.Should().NotThrow();
 }
 
 
@@ -65,90 +98,50 @@ public class CeidgAddressingInspector : IClientMessageInspector
 
 
 
-public class CeidgEndpointBehavior : IEndpointBehavior
+
+
+
+
+
+public class CeidgEndpointBehaviorTests
 {
-    private readonly IClientMessageInspector _inspector;
-
-    public CeidgEndpointBehavior(IClientMessageInspector inspector)
+    [Fact]
+    public void ApplyClientBehavior_Should_Add_Inspector()
     {
-        _inspector = inspector;
-    }
+        // arrange
+        var inspector = new Mock<IClientMessageInspector>();
+        var behavior = new CeidgEndpointBehavior(inspector.Object);
 
-    public void ApplyClientBehavior(ServiceEndpoint endpoint, ClientRuntime clientRuntime)
-    {
-        clientRuntime.ClientMessageInspectors.Add(_inspector);
-    }
+        var clientRuntime = new ClientRuntime("test", "test");
+        var endpoint = new ServiceEndpoint();
 
-    public void AddBindingParameters(ServiceEndpoint endpoint, BindingParameterCollection bindingParameters) { }
-    public void ApplyDispatchBehavior(ServiceEndpoint endpoint, EndpointDispatcher endpointDispatcher) { }
-    public void Validate(ServiceEndpoint endpoint) { }
-}
+        // act
+        behavior.ApplyClientBehavior(endpoint, clientRuntime);
 
-
-public interface ICeidgClient
-{
-    Task<GetEntryStatusResponse> GetEntryStatusAsync(GetEntryStatusRequest request);
-    Task<GetEntryResponse> GetEntryAsync(GetEntryRequest request);
-}
-
-
-public class CeidgClient : ICeidgClient
-{
-    private readonly ApiServiceClient _client;
-
-    public CeidgClient(ApiServiceClient client)
-    {
-        _client = client;
-    }
-
-    public async Task<GetEntryStatusResponse> GetEntryStatusAsync(GetEntryStatusRequest request)
-    {
-        return await Execute(async () =>
-            await _client.GetEntryStatusAsync(request));
-    }
-
-    public async Task<GetEntryResponse> GetEntryAsync(GetEntryRequest request)
-    {
-        return await Execute(async () =>
-            await _client.GetEntryAsync(request));
-    }
-
-    // 🔥 wspólna logika (retry, logi, handling)
-    private async Task<T> Execute<T>(Func<Task<T>> action)
-    {
-        try
-        {
-            return await action();
-        }
-        catch (Exception ex)
-        {
-            // tu możesz:
-            // - logować SOAP
-            // - retry
-            // - mapować błędy
-            throw;
-        }
+        // assert
+        clientRuntime.ClientMessageInspectors.Should().Contain(inspector.Object);
     }
 }
 
 
 
-builder.Services.AddSingleton<ApiServiceClient>(sp =>
+
+
+[Fact]
+public void Inspector_Should_Modify_Real_Message()
 {
-    var client = new ApiServiceClient(binding, address);
+    var inspector = new CeidgAddressingInspector();
 
-    // logger
-    client.Endpoint.EndpointBehaviors.Add(
-        sp.GetRequiredService<MessageLoggerBehavior>());
+    var message = Message.CreateMessage(
+        MessageVersion.Soap12WSAddressing10,
+        "http://tempuri.org/IApiService/GetEntry",
+        "body");
 
-    // WS-Addressing
-    client.Endpoint.EndpointBehaviors.Add(
-        sp.GetRequiredService<CeidgEndpointBehavior>());
+    var channel = new Mock<IClientChannel>();
+    channel.Setup(c => c.RemoteAddress)
+           .Returns(new EndpointAddress("https://real"));
 
-    return client;
-});
+    inspector.BeforeSendRequest(ref message, channel.Object);
 
-builder.Services.AddTransient<IClientMessageInspector, CeidgAddressingInspector>();
-builder.Services.AddTransient<CeidgEndpointBehavior>();
-
-builder.Services.AddScoped<ICeidgClient, CeidgClient>();
+    message.Headers.Action.Should().Contain("zeto.bialystok.pl");
+}
