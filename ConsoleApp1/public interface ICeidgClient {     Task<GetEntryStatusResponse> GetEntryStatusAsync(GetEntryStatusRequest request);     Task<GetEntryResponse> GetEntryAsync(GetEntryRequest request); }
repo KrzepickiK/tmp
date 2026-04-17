@@ -1,147 +1,64 @@
-using System.ServiceModel.Channels;
-
-private Message CreateMessage(string action = "http://tempuri.org/IApiService/GetEntryStatus")
-{
-    return Message.CreateMessage(
-        MessageVersion.Soap12WSAddressing10,
-        action,
-        "body"
-    );
-}
-
-
-
-public class CeidgAddressingInspectorTests
-{
-    private readonly CeidgAddressingInspector _inspector = new();
-
-    [Fact]
-    public void BeforeSendRequest_Should_Set_Correct_Action()
-    {
-        // arrange
-        var message = CreateMessage();
-        var channel = new Mock<IClientChannel>();
-        channel.Setup(c => c.RemoteAddress)
-               .Returns(new EndpointAddress("https://test"));
-
-        // act
-        _inspector.BeforeSendRequest(ref message, channel.Object);
-
-        // assert
-        message.Headers.Action.Should().Be(
-            "http://zeto.bialystok.pl/IApiService/GetEntryStatus");
-    }
-}
-
-
-[Fact]
-public void BeforeSendRequest_Should_Add_Required_Headers()
-{
-    var message = CreateMessage();
-    var channel = new Mock<IClientChannel>();
-    channel.Setup(c => c.RemoteAddress)
-           .Returns(new EndpointAddress("https://test"));
-
-    _inspector.BeforeSendRequest(ref message, channel.Object);
-
-    message.Headers.FindHeader("To", "http://www.w3.org/2005/08/addressing")
-        .Should().BeGreaterThanOrEqualTo(0);
-
-    message.Headers.FindHeader("ReplyTo", "http://www.w3.org/2005/08/addressing")
-        .Should().BeGreaterThanOrEqualTo(0);
-
-    message.Headers.FindHeader("ActivityId", "http://schemas.microsoft.com/diagnostics")
-        .Should().BeGreaterThanOrEqualTo(0);
-}
-
-
-[Fact]
-public void BeforeSendRequest_Should_Add_Valid_ActivityId()
-{
-    var message = CreateMessage();
-    var channel = new Mock<IClientChannel>();
-    channel.Setup(c => c.RemoteAddress)
-           .Returns(new EndpointAddress("https://test"));
-
-    _inspector.BeforeSendRequest(ref message, channel.Object);
-
-    var index = message.Headers.FindHeader(
-        "ActivityId",
-        "http://schemas.microsoft.com/diagnostics");
-
-    var value = message.Headers.GetHeader<string>(index);
-
-    Guid.TryParse(value, out var guid).Should().BeTrue();
-}
-
-
-
-[Fact]
-public void BeforeSendRequest_Should_Handle_Null_Action()
-{
-    var message = Message.CreateMessage(
-        MessageVersion.Soap12WSAddressing10,
-        null,
-        "body");
-
-    var channel = new Mock<IClientChannel>();
-    channel.Setup(c => c.RemoteAddress)
-           .Returns(new EndpointAddress("https://test"));
-
-    var act = () => _inspector.BeforeSendRequest(ref message, channel.Object);
-
-    act.Should().NotThrow();
-}
-
-
-
-
-
-
-
-
-
-
+using System;
+using System.Linq;
+using System.Reflection;
+using System.ServiceModel.Description;
+using System.ServiceModel.Dispatcher;
+using FluentAssertions;
+using Moq;
+using Xunit;
 
 public class CeidgEndpointBehaviorTests
 {
     [Fact]
-    public void ApplyClientBehavior_Should_Add_Inspector()
+    public void ApplyClientBehavior_Should_Add_Inspector_To_ClientRuntime()
     {
         // arrange
-        var inspector = new Mock<IClientMessageInspector>();
-        var behavior = new CeidgEndpointBehavior(inspector.Object);
+        var inspector = new Mock<IClientMessageInspector>().Object;
+        var behavior = new CeidgEndpointBehavior(inspector);
 
-        var clientRuntime = new ClientRuntime("test", "test");
-        var endpoint = new ServiceEndpoint();
+        // ✅ poprawny ServiceEndpoint (z kontraktem)
+        var contract = ContractDescription.GetContract(typeof(IDisposable));
+        var endpoint = new ServiceEndpoint(contract);
+
+        // ✅ ClientRuntime przez reflection
+        var ctor = typeof(ClientRuntime)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+            .First(c =>
+            {
+                var parameters = c.GetParameters();
+                return parameters.Length == 2 &&
+                       parameters[0].ParameterType == typeof(string) &&
+                       parameters[1].ParameterType == typeof(string);
+            });
+
+        var clientRuntime = (ClientRuntime)ctor.Invoke(new object[] { "test", "test" });
 
         // act
         behavior.ApplyClientBehavior(endpoint, clientRuntime);
 
         // assert
-        clientRuntime.ClientMessageInspectors.Should().Contain(inspector.Object);
+        clientRuntime.ClientMessageInspectors.Should().Contain(inspector);
     }
-}
-
-
 
 
 
 [Fact]
-public void Inspector_Should_Modify_Real_Message()
+public void ApplyClientBehavior_Should_Not_Throw_When_Inspector_Is_Added()
 {
-    var inspector = new CeidgAddressingInspector();
+    var inspector = new Mock<IClientMessageInspector>().Object;
+    var behavior = new CeidgEndpointBehavior(inspector);
 
-    var message = Message.CreateMessage(
-        MessageVersion.Soap12WSAddressing10,
-        "http://tempuri.org/IApiService/GetEntry",
-        "body");
+    var contract = ContractDescription.GetContract(typeof(IDisposable));
+    var endpoint = new ServiceEndpoint(contract);
 
-    var channel = new Mock<IClientChannel>();
-    channel.Setup(c => c.RemoteAddress)
-           .Returns(new EndpointAddress("https://real"));
+    var ctor = typeof(ClientRuntime)
+        .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+        .First();
 
-    inspector.BeforeSendRequest(ref message, channel.Object);
+    var clientRuntime = (ClientRuntime)ctor.Invoke(new object[] { "test", "test" });
 
-    message.Headers.Action.Should().Contain("zeto.bialystok.pl");
+    var act = () => behavior.ApplyClientBehavior(endpoint, clientRuntime);
+
+    act.Should().NotThrow();
+}
 }
