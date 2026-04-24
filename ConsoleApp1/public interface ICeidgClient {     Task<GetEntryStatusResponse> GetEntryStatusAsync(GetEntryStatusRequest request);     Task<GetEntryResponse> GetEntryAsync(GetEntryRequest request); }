@@ -1,100 +1,164 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
+using Microsoft.Extensions.DependencyInjection;
+
+#region INTERFACES
+
 public interface IMapper
 {
     TTarget Map<TTarget>(object source);
-
     List<TTarget> MapList<TTarget>(IEnumerable<object> source);
 }
 
+public interface IMap<TSource, TTarget>
+{
+    TTarget Map(TSource source);
+}
+
+#endregion
+
+#region MAPPER CORE (MAX PERFORMANCE)
 
 public class SimpleMapper : IMapper
 {
+    private readonly Dictionary<(Type, Type), Func<object, object>> _mapFuncs;
+
+    public SimpleMapper(IEnumerable<object> mappers)
+    {
+        _mapFuncs = new Dictionary<(Type, Type), Func<object, object>>();
+
+        foreach (var mapper in mappers)
+        {
+            var interfaces = mapper.GetType().GetInterfaces()
+                .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IMap<,>));
+
+            foreach (var iface in interfaces)
+            {
+                var sourceType = iface.GenericTypeArguments[0];
+                var targetType = iface.GenericTypeArguments[1];
+
+                var method = iface.GetMethod("Map");
+
+                // src => (object)((TMapper)mapper).Map((TSource)src)
+                var srcParam = Expression.Parameter(typeof(object), "src");
+
+                var castSrc = Expression.Convert(srcParam, sourceType);
+                var instance = Expression.Constant(mapper);
+                var call = Expression.Call(instance, method, castSrc);
+                var castResult = Expression.Convert(call, typeof(object));
+
+                var lambda = Expression.Lambda<Func<object, object>>(castResult, srcParam).Compile();
+
+                _mapFuncs[(sourceType, targetType)] = lambda;
+            }
+        }
+    }
+
     public TTarget Map<TTarget>(object source)
     {
         if (source == null) return default;
 
-        return source switch
-        {
-            // Error
-            Microservice.Common.Validation.Error e 
-                when typeof(TTarget) == typeof(TransferError)
-                => (TTarget)(object)e.ToTransferError(),
+        var key = (source.GetType(), typeof(TTarget));
 
-            Common.Rest.BMDomainMicroAccountingApi.TransferError e 
-                when typeof(TTarget) == typeof(Microservice.Common.Validation.Error)
-                => (TTarget)(object)e.ToValidationError(),
+        if (!_mapFuncs.TryGetValue(key, out var func))
+            throw new InvalidOperationException(
+                $"No mapping from {key.Item1.Name} to {key.Item2.Name}");
 
-            // Account
-            Common.Rest.BMDomainAccountsResourceProxyApi.AccountItem a
-                when typeof(TTarget) == typeof(TransferAccount)
-                => (TTarget)(object)a.ToDomain(),
-
-            // Transfer (jeśli masz)
-            Transfer t when typeof(TTarget) == typeof(TransferDto)
-                => (TTarget)(object)t.ToDto(this),
-
-            _ => throw new InvalidOperationException(
-                $"No mapping defined from {source.GetType().Name} to {typeof(TTarget).Name}")
-        };
+        return (TTarget)func(source);
     }
 
     public List<TTarget> MapList<TTarget>(IEnumerable<object> source)
     {
         if (source == null) return new List<TTarget>();
 
-        return source.Select(x => Map<TTarget>(x)).ToList();
+        return source.Select(Map<TTarget>).ToList();
     }
 }
 
+#endregion
 
+#region AUTO REGISTRATION
 
-
-
-public class SimpleMapper : IMapper
+public static class MappingExtensions
 {
-    public TTarget Map<TTarget>(object source)
+    public static IServiceCollection AddMappings(this IServiceCollection services, Assembly assembly)
     {
-        if (source == null) return default;
+        var types = assembly.GetTypes()
+            .Where(t => !t.IsAbstract && !t.IsInterface)
+            .Where(t => t.GetInterfaces()
+                .Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IMap<,>)));
 
-        return source switch
+        foreach (var type in types)
         {
-            // Error
-            Microservice.Common.Validation.Error e 
-                when typeof(TTarget) == typeof(TransferError)
-                => (TTarget)(object)e.ToTransferError(),
+            services.AddSingleton(type);
+        }
 
-            Common.Rest.BMDomainMicroAccountingApi.TransferError e 
-                when typeof(TTarget) == typeof(Microservice.Common.Validation.Error)
-                => (TTarget)(object)e.ToValidationError(),
+        services.AddSingleton<IMapper>(sp =>
+        {
+            var mappers = types.Select(t => sp.GetRequiredService(t)).ToList();
+            return new SimpleMapper(mappers);
+        });
 
-            // Account
-            Common.Rest.BMDomainAccountsResourceProxyApi.AccountItem a
-                when typeof(TTarget) == typeof(TransferAccount)
-                => (TTarget)(object)a.ToDomain(),
-
-            // Transfer (jeśli masz)
-            Transfer t when typeof(TTarget) == typeof(TransferDto)
-                => (TTarget)(object)t.ToDto(this),
-
-            _ => throw new InvalidOperationException(
-                $"No mapping defined from {source.GetType().Name} to {typeof(TTarget).Name}")
-        };
-    }
-
-    public List<TTarget> MapList<TTarget>(IEnumerable<object> source)
-    {
-        if (source == null) return new List<TTarget>();
-
-        return source.Select(x => Map<TTarget>(x)).ToList();
+        return services;
     }
 }
 
+#endregion
 
+#region ===== PRZYKŁADOWE MODELE =====
 
-
-
-public static class ErrorMappings
+public class Error
 {
-    public static TransferError ToTransferError(this Microservice.Common.Validation.Error src)
+    public string ValidationErrorTitle { get; set; }
+    public string ValidationErrorField { get; set; }
+    public string ValidationErrorMessage { get; set; }
+}
+
+public class TransferError
+{
+    public string ErrorCode { get; set; }
+    public string ErrorField { get; set; }
+    public string ErrorDescription { get; set; }
+}
+
+public class AccountItem
+{
+    public decimal AvailableBalance { get; set; }
+    public string AccountCurrencyCode { get; set; }
+}
+
+public class TransferAccount
+{
+    public decimal Balance { get; set; }
+    public string CurrencyCode { get; set; }
+}
+
+public class Transfer
+{
+    public int Id { get; set; }
+    public decimal Amount { get; set; }
+    public AccountItem Account { get; set; }
+    public List<Error> Errors { get; set; }
+}
+
+public class TransferDto
+{
+    public int Id { get; set; }
+    public decimal Amount { get; set; }
+    public TransferAccount Account { get; set; }
+    public List<TransferError> Errors { get; set; }
+}
+
+#endregion
+
+#region ===== MAPPERY =====
+
+public class ErrorToTransferErrorMapper : IMap<Error, TransferError>
+{
+    public TransferError Map(Error src)
     {
         if (src == null) return null;
 
@@ -105,29 +169,11 @@ public static class ErrorMappings
             ErrorDescription = src.ValidationErrorMessage
         };
     }
-
-    public static Microservice.Common.Validation.Error ToValidationError(
-        this Common.Rest.BMDomainMicroAccountingApi.TransferError src)
-    {
-        if (src == null) return null;
-
-        return new Microservice.Common.Validation.Error
-        {
-            ValidationErrorTitle = src.ErrorCode,
-            ValidationErrorField = src.ErrorField,
-            ValidationErrorMessage = src.ErrorDescription
-        };
-    }
 }
 
-
-
-
-
-public static class AccountMappings
+public class AccountMapper : IMap<AccountItem, TransferAccount>
 {
-    public static TransferAccount ToDomain(
-        this Common.Rest.BMDomainAccountsResourceProxyApi.AccountItem src)
+    public TransferAccount Map(AccountItem src)
     {
         if (src == null) return null;
 
@@ -139,15 +185,16 @@ public static class AccountMappings
     }
 }
 
-
-
-
-
-
-
-public static class TransferMappings
+public class TransferMapper : IMap<Transfer, TransferDto>
 {
-    public static TransferDto ToDto(this Transfer src, IMapper mapper)
+    private readonly IMapper _mapper;
+
+    public TransferMapper(IMapper mapper)
+    {
+        _mapper = mapper;
+    }
+
+    public TransferDto Map(Transfer src)
     {
         if (src == null) return null;
 
@@ -155,12 +202,10 @@ public static class TransferMappings
         {
             Id = src.Id,
             Amount = src.Amount,
-
-            Account = mapper.Map<TransferAccount>(src.Account),
-
-            Errors = src.Errors?
-                .Select(e => mapper.Map<TransferError>(e))
-                .ToList() ?? new List<TransferError>()
+            Account = _mapper.Map<TransferAccount>(src.Account),
+            Errors = _mapper.MapList<TransferError>(src.Errors)
         };
     }
 }
+
+#endregion
