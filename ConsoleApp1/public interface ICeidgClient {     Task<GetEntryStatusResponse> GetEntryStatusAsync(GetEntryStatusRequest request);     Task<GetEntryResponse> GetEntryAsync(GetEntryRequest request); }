@@ -1,88 +1,9 @@
-public static class TransactionMappings
+public static class MappingExtensions
 {
-    public static Transaction ToDomain(this SearchResultEntityTransactions src)
+    public static List<TTarget> MapList<TSource, TTarget>(
+        this IEnumerable<TSource> source,
+        Func<TSource, TTarget> map)
     {
-        if (src == null) return null;
-
-        var desc = src.Content.Description;
-
-        var dest = new Transaction
-        {
-            Amount = src.Amount,
-            Id = src.Id,
-            Sign = src.Sign,
-            Status = src.Status,
-            Currency = src.Currency,
-            AmountPLN = src.AmountPLN,
-            TransactionDate = src.TransactionDate,
-            PostingDate = src.PostingDate,
-            Code = src.Code
-        };
-
-        var isIn = src.Content.Sign == SearchResultEntityContentSign.CR;
-
-        dest.OperationType = isIn
-            ? TransactionOperationType.In
-            : src.Content.Sign == SearchResultEntityContentSign.DB
-                ? TransactionOperationType.Out
-                : throw new InvalidOperationException();
-
-        var nameKey = isIn ? "S_Name" : "R_Name";
-        var addressKey = isIn ? "S_Address" : "R_Address";
-
-        dest.ParticipantName = string.Join(" ", Values(desc, nameKey));
-        dest.Address = string.Join(" ", Values(desc, addressKey));
-
-        dest.DestinationAccount = Value(desc, "R_Acc");
-        dest.SourceAccount = Value(desc, "S_Acc");
-
-        dest.Description = BuildDescription(src, desc);
-
-        return dest;
-    }
-
-    private static string BuildDescription(
-        SearchResultEntityTransactions src,
-        ICollection<SearchResultDescription> desc)
-    {
-        return src.Content.Type switch
-        {
-            "TFRTAXOUT" => BuildTaxDescription(desc),
-            _ => Value(desc, "TADSCFUL")
-        };
-    }
-
-    private static string BuildTaxDescription(ICollection<SearchResultDescription> desc)
-    {
-        var taxYear = Value(desc, "S_Tax_Year");
-        taxYear = taxYear?.Length > 2 ? taxYear[^2..] : taxYear;
-
-        return string.Join(" ", new[]
-        {
-            Value(desc, "S_Tax_Id"),
-            taxYear,
-            Value(desc, "S_Tax_Period_Type"),
-            Value(desc, "S_Tax_Period"),
-            Value(desc, "S_Form_Symbol")
-        });
-    }
-
-    private static IEnumerable<string> Values(
-        ICollection<SearchResultDescription> desc,
-        string key)
-    {
-        return desc
-            .Where(d => d.ExtendedAttributes == key)
-            .OrderBy(d => d.FieldCode)
-            .Select(d => d.Value);
-    }
-
-    private static string Value(
-        ICollection<SearchResultDescription> desc,
-        string key)
-    {
-        return desc
-            .FirstOrDefault(d => d.ExtendedAttributes == key)
-            ?.Value ?? string.Empty;
+        return source?.Select(map).ToList() ?? new List<TTarget>();
     }
 }
