@@ -1,64 +1,166 @@
-using System;
-using System.Linq;
-using System.Reflection;
-using System.ServiceModel.Description;
-using System.ServiceModel.Dispatcher;
-using FluentAssertions;
-using Moq;
-using Xunit;
-
-public class CeidgEndpointBehaviorTests
+public interface IMapper
 {
-    [Fact]
-    public void ApplyClientBehavior_Should_Add_Inspector_To_ClientRuntime()
+    TTarget Map<TTarget>(object source);
+
+    List<TTarget> MapList<TTarget>(IEnumerable<object> source);
+}
+
+
+public class SimpleMapper : IMapper
+{
+    public TTarget Map<TTarget>(object source)
     {
-        // arrange
-        var inspector = new Mock<IClientMessageInspector>().Object;
-        var behavior = new CeidgEndpointBehavior(inspector);
+        if (source == null) return default;
 
-        // ✅ poprawny ServiceEndpoint (z kontraktem)
-        var contract = ContractDescription.GetContract(typeof(IDisposable));
-        var endpoint = new ServiceEndpoint(contract);
+        return source switch
+        {
+            // Error
+            Microservice.Common.Validation.Error e 
+                when typeof(TTarget) == typeof(TransferError)
+                => (TTarget)(object)e.ToTransferError(),
 
-        // ✅ ClientRuntime przez reflection
-        var ctor = typeof(ClientRuntime)
-            .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
-            .First(c =>
-            {
-                var parameters = c.GetParameters();
-                return parameters.Length == 2 &&
-                       parameters[0].ParameterType == typeof(string) &&
-                       parameters[1].ParameterType == typeof(string);
-            });
+            Common.Rest.BMDomainMicroAccountingApi.TransferError e 
+                when typeof(TTarget) == typeof(Microservice.Common.Validation.Error)
+                => (TTarget)(object)e.ToValidationError(),
 
-        var clientRuntime = (ClientRuntime)ctor.Invoke(new object[] { "test", "test" });
+            // Account
+            Common.Rest.BMDomainAccountsResourceProxyApi.AccountItem a
+                when typeof(TTarget) == typeof(TransferAccount)
+                => (TTarget)(object)a.ToDomain(),
 
-        // act
-        behavior.ApplyClientBehavior(endpoint, clientRuntime);
+            // Transfer (jeśli masz)
+            Transfer t when typeof(TTarget) == typeof(TransferDto)
+                => (TTarget)(object)t.ToDto(this),
 
-        // assert
-        clientRuntime.ClientMessageInspectors.Should().Contain(inspector);
+            _ => throw new InvalidOperationException(
+                $"No mapping defined from {source.GetType().Name} to {typeof(TTarget).Name}")
+        };
     }
 
+    public List<TTarget> MapList<TTarget>(IEnumerable<object> source)
+    {
+        if (source == null) return new List<TTarget>();
 
-
-[Fact]
-public void ApplyClientBehavior_Should_Not_Throw_When_Inspector_Is_Added()
-{
-    var inspector = new Mock<IClientMessageInspector>().Object;
-    var behavior = new CeidgEndpointBehavior(inspector);
-
-    var contract = ContractDescription.GetContract(typeof(IDisposable));
-    var endpoint = new ServiceEndpoint(contract);
-
-    var ctor = typeof(ClientRuntime)
-        .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
-        .First();
-
-    var clientRuntime = (ClientRuntime)ctor.Invoke(new object[] { "test", "test" });
-
-    var act = () => behavior.ApplyClientBehavior(endpoint, clientRuntime);
-
-    act.Should().NotThrow();
+        return source.Select(x => Map<TTarget>(x)).ToList();
+    }
 }
+
+
+
+
+
+public class SimpleMapper : IMapper
+{
+    public TTarget Map<TTarget>(object source)
+    {
+        if (source == null) return default;
+
+        return source switch
+        {
+            // Error
+            Microservice.Common.Validation.Error e 
+                when typeof(TTarget) == typeof(TransferError)
+                => (TTarget)(object)e.ToTransferError(),
+
+            Common.Rest.BMDomainMicroAccountingApi.TransferError e 
+                when typeof(TTarget) == typeof(Microservice.Common.Validation.Error)
+                => (TTarget)(object)e.ToValidationError(),
+
+            // Account
+            Common.Rest.BMDomainAccountsResourceProxyApi.AccountItem a
+                when typeof(TTarget) == typeof(TransferAccount)
+                => (TTarget)(object)a.ToDomain(),
+
+            // Transfer (jeśli masz)
+            Transfer t when typeof(TTarget) == typeof(TransferDto)
+                => (TTarget)(object)t.ToDto(this),
+
+            _ => throw new InvalidOperationException(
+                $"No mapping defined from {source.GetType().Name} to {typeof(TTarget).Name}")
+        };
+    }
+
+    public List<TTarget> MapList<TTarget>(IEnumerable<object> source)
+    {
+        if (source == null) return new List<TTarget>();
+
+        return source.Select(x => Map<TTarget>(x)).ToList();
+    }
+}
+
+
+
+
+
+public static class ErrorMappings
+{
+    public static TransferError ToTransferError(this Microservice.Common.Validation.Error src)
+    {
+        if (src == null) return null;
+
+        return new TransferError
+        {
+            ErrorCode = src.ValidationErrorTitle,
+            ErrorField = src.ValidationErrorField,
+            ErrorDescription = src.ValidationErrorMessage
+        };
+    }
+
+    public static Microservice.Common.Validation.Error ToValidationError(
+        this Common.Rest.BMDomainMicroAccountingApi.TransferError src)
+    {
+        if (src == null) return null;
+
+        return new Microservice.Common.Validation.Error
+        {
+            ValidationErrorTitle = src.ErrorCode,
+            ValidationErrorField = src.ErrorField,
+            ValidationErrorMessage = src.ErrorDescription
+        };
+    }
+}
+
+
+
+
+
+public static class AccountMappings
+{
+    public static TransferAccount ToDomain(
+        this Common.Rest.BMDomainAccountsResourceProxyApi.AccountItem src)
+    {
+        if (src == null) return null;
+
+        return new TransferAccount
+        {
+            Balance = src.AvailableBalance,
+            CurrencyCode = src.AccountCurrencyCode
+        };
+    }
+}
+
+
+
+
+
+
+
+public static class TransferMappings
+{
+    public static TransferDto ToDto(this Transfer src, IMapper mapper)
+    {
+        if (src == null) return null;
+
+        return new TransferDto
+        {
+            Id = src.Id,
+            Amount = src.Amount,
+
+            Account = mapper.Map<TransferAccount>(src.Account),
+
+            Errors = src.Errors?
+                .Select(e => mapper.Map<TransferError>(e))
+                .ToList() ?? new List<TransferError>()
+        };
+    }
 }
